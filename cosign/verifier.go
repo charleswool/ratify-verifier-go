@@ -280,6 +280,7 @@ func (v *Verifier) Verify(ctx context.Context, opts *ratify.VerifyOptions) (*rat
 		result.Description = "Cosign signature verification succeeded"
 	} else {
 		result.Description = "Cosign signature verification failed: no valid signatures found"
+		result.Err = errors.New("no valid signatures found, see result for details")
 	}
 	return result, nil
 }

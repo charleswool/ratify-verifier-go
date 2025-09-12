@@ -3,7 +3,7 @@ module github.com/notaryproject/ratify-verifier-go/cosign
 go 1.24.0
 
 require (
-	github.com/notaryproject/ratify-go v0.0.0-20250818061551-d370d67b849c
+	github.com/notaryproject/ratify-go v0.0.0-20250829072315-27c492341d9c
 	github.com/opencontainers/go-digest v1.0.0
 	github.com/opencontainers/image-spec v1.1.1
 	github.com/sigstore/protobuf-specs v0.4.1
