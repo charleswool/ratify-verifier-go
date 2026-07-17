@@ -96,6 +96,12 @@ type VerifierOptions struct {
 	// Only applies to keyless verification. Optional, defaults to false.
 	IgnoreCTLog bool
 
+	// IgnoreObserverTimestamps when set to true, skips observer timestamp
+	// verification (RFC3161 or log SignedEntryTimestamp), allowing key-based
+	// verification without a timestamp. Only applies to key-based verification.
+	// Optional, defaults to false.
+	IgnoreObserverTimestamps bool
+
 	// TUFOptions provides custom TUF client options for fetching trusted root.
 	// Optional.
 	TUFOptions *tuf.Options
@@ -182,7 +188,11 @@ func createVerifier(opts *VerifierOptions) (*verify.Verifier, error) {
 	}
 
 	// Configure timestamp verification
-	verifierOpts = append(verifierOpts, verify.WithObserverTimestamps(1))
+	if opts.IgnoreObserverTimestamps && opts.GetPublicKeys != nil {
+		verifierOpts = append(verifierOpts, verify.WithCurrentTime())
+	} else {
+		verifierOpts = append(verifierOpts, verify.WithObserverTimestamps(1))
+	}
 
 	// Configure certificate transparency log verification
 	if !opts.IgnoreCTLog {

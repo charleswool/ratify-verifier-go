@@ -24,6 +24,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
@@ -2314,5 +2315,125 @@ func TestVerifier_VerifySignatureLayerBundleCreationError(t *testing.T) {
 	// If there's an error, it should be in bundle creation step
 	if !strings.Contains(err.Error(), "error creating bundle") {
 		t.Logf("Got error (this might be expected): %v", err)
+	}
+}
+
+// signKeyLayer builds a cosign simple-signing layer whose message signature is
+// produced by signing the layer digest with the given ECDSA key. The returned
+// layer carries no transparency-log bundle and no timestamp, mirroring an image
+// signed offline (e.g. `cosign sign --tlog-upload=false --key ...`).
+func signKeyLayer(t *testing.T, priv *ecdsa.PrivateKey) ocispec.Descriptor {
+	t.Helper()
+
+	payload := []byte("test simple signing payload")
+	dgst := digest.FromBytes(payload)
+	digestBytes, err := hex.DecodeString(dgst.Encoded())
+	if err != nil {
+		t.Fatalf("failed to decode digest: %v", err)
+	}
+
+	sig, err := ecdsa.SignASN1(rand.Reader, priv, digestBytes)
+	if err != nil {
+		t.Fatalf("failed to sign digest: %v", err)
+	}
+
+	return ocispec.Descriptor{
+		MediaType: mediaTypeSimpleSigning,
+		Digest:    dgst,
+		Size:      int64(len(payload)),
+		Annotations: map[string]string{
+			annotationKeySignature: base64.StdEncoding.EncodeToString(sig),
+		},
+	}
+}
+
+// TestVerifier_IgnoreObserverTimestamps verifies that a key-based signature
+// without a transparency-log entry or RFC3161 timestamp is accepted only when
+// IgnoreObserverTimestamps is enabled, and rejected otherwise because no
+// observer timestamp is available.
+func TestVerifier_IgnoreObserverTimestamps(t *testing.T) {
+	ctx := context.Background()
+	repo := "test/repo"
+
+	priv, pub, err := generateTestKey()
+	if err != nil {
+		t.Fatalf("failed to generate test key: %v", err)
+	}
+
+	sigLayer := signKeyLayer(t, priv)
+
+	manifestBytes, err := createTestManifest([]ocispec.Descriptor{sigLayer})
+	if err != nil {
+		t.Fatalf("failed to create test manifest: %v", err)
+	}
+	artifactDesc := ocispec.Descriptor{
+		ArtifactType: mediaTypeCosignArtifactSignature,
+		MediaType:    ocispec.MediaTypeImageManifest,
+		Digest:       digest.FromBytes(manifestBytes),
+		Size:         int64(len(manifestBytes)),
+	}
+
+	getPublicKeys := (&testTrustedPublicKeys{
+		configs: []*PublicKeyConfig{
+			{
+				PublicKey:          pub,
+				SignatureAlgorithm: crypto.SHA256,
+			},
+		},
+	}).GetPublicKeys
+
+	tests := []struct {
+		name                     string
+		ignoreObserverTimestamps bool
+		wantVerified             bool
+	}{
+		{
+			name:                     "ignore observer timestamps accepts key signature",
+			ignoreObserverTimestamps: true,
+			wantVerified:             true,
+		},
+		{
+			name:                     "default requires observer timestamp",
+			ignoreObserverTimestamps: false,
+			wantVerified:             false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := newMockStore()
+			store.addManifest(repo, artifactDesc, manifestBytes)
+
+			verifier, err := NewVerifier(&VerifierOptions{
+				Name:                     "test-verifier",
+				GetPublicKeys:            getPublicKeys,
+				IdentityPolicies:         []verify.PolicyOption{verify.WithKey()},
+				IgnoreTLog:               true,
+				IgnoreCTLog:              true,
+				IgnoreObserverTimestamps: tt.ignoreObserverTimestamps,
+			})
+			if err != nil {
+				t.Fatalf("failed to create verifier: %v", err)
+			}
+
+			result, err := verifier.Verify(ctx, &ratify.VerifyOptions{
+				Store:              store,
+				Repository:         repo,
+				ArtifactDescriptor: artifactDesc,
+			})
+			if err != nil {
+				t.Fatalf("unexpected error during verification: %v", err)
+			}
+
+			if tt.wantVerified {
+				if result.Err != nil {
+					t.Fatalf("expected verification to succeed, got error: %v", result.Err)
+				}
+			} else {
+				if result.Err == nil {
+					t.Fatalf("expected verification to fail without a timestamp, but it succeeded")
+				}
+			}
+		})
 	}
 }
