@@ -189,7 +189,7 @@ func createVerifier(opts *VerifierOptions) (*verify.Verifier, error) {
 
 	// Configure timestamp verification
 	if opts.IgnoreObserverTimestamps && opts.GetPublicKeys != nil {
-		verifierOpts = append(verifierOpts, verify.WithCurrentTime())
+		verifierOpts = append(verifierOpts, verify.WithNoObserverTimestamps())
 	} else {
 		verifierOpts = append(verifierOpts, verify.WithObserverTimestamps(1))
 	}
