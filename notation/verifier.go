@@ -19,19 +19,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"net/http"
-	"reflect"
-	"time"
 
-	"github.com/notaryproject/notation-core-go/revocation"
-	corecrl "github.com/notaryproject/notation-core-go/revocation/crl"
-	"github.com/notaryproject/notation-core-go/revocation/purpose"
 	"github.com/notaryproject/notation-go"
-	"github.com/notaryproject/notation-go/dir"
 	"github.com/notaryproject/notation-go/plugin"
 	notationRegistry "github.com/notaryproject/notation-go/registry"
 	"github.com/notaryproject/notation-go/verifier"
-	notationcrl "github.com/notaryproject/notation-go/verifier/crl"
 	"github.com/notaryproject/notation-go/verifier/trustpolicy"
 	"github.com/notaryproject/notation-go/verifier/truststore"
 	"github.com/notaryproject/ratify-go"
@@ -39,18 +31,6 @@ import (
 )
 
 const notationVerifierType = "notation"
-
-// defaultCRLFetchTimeout bounds each CRL distribution-point fetch so a slow or
-// unresponsive CRL server cannot block signature verification indefinitely.
-const defaultCRLFetchTimeout = 10 * time.Second
-
-// These indirections wrap external constructors so that their defensive error
-// paths can be exercised by tests.
-var (
-	newHTTPCRLFetcher      = corecrl.NewHTTPFetcher
-	newRevocationValidator = revocation.NewWithOptions
-	crlCacheRootPath       = func() (string, error) { return dir.CacheFS().SysPath(dir.PathCRLCache) }
-)
 
 // VerifierOptions contains the options for creating a new Notation verifier.
 type VerifierOptions struct {
@@ -75,30 +55,9 @@ type VerifierOptions struct {
 	PluginManager plugin.Manager
 
 	// CRL configures certificate revocation list checks. Optional. When set,
-	// missing revocation validators are created using the configured CRL
-	// fetcher.
+	// code signing and timestamping revocation validators are created using the
+	// configured CRL fetcher.
 	CRL *CRLOptions
-
-	// RevocationCodeSigningValidator validates revocation status of the code
-	// signing certificate chain. Optional. If unset and CRL is set, a validator
-	// is created automatically.
-	RevocationCodeSigningValidator revocation.Validator
-
-	// RevocationTimestampingValidator validates revocation status of the
-	// timestamping certificate chain. Optional. If unset and CRL is set, a
-	// validator is created automatically.
-	RevocationTimestampingValidator revocation.Validator
-}
-
-// CRLOptions contains options for CRL revocation checking.
-type CRLOptions struct {
-	// CacheEnabled enables file-backed CRL caching using Notation's cache
-	// directory. Optional.
-	CacheEnabled bool
-
-	// HTTPTimeout bounds each CRL distribution-point fetch. Optional. When zero
-	// or negative, defaultCRLFetchTimeout is used.
-	HTTPTimeout time.Duration
 }
 
 // Verifier is a ratify.Verifier implementation that verifies Notation
@@ -116,107 +75,41 @@ func NewVerifier(opts *VerifierOptions) (*Verifier, error) {
 	if opts.Name == "" {
 		return nil, fmt.Errorf("verifier name cannot be empty")
 	}
-	if opts.TrustPolicyDoc == nil {
-		return nil, fmt.Errorf("trust policy document cannot be nil")
-	}
+	// TrustStore is an interface, so notation-go's untyped-nil check misses a
+	// typed-nil value, which would panic during verification; guard it here.
 	if isNil(opts.TrustStore) {
 		return nil, fmt.Errorf("trust store cannot be nil")
 	}
 
-	verifierOpts, err := newVerifierOptions(opts)
+	notationVerifier, err := opts.toNotationVerifier()
 	if err != nil {
 		return nil, err
-	}
-	v, err := verifier.NewWithOptions(opts.TrustPolicyDoc, opts.TrustStore, opts.PluginManager, verifierOpts)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create notation verifier: %w", err)
 	}
 
 	return &Verifier{
 		name:     opts.Name,
-		verifier: v,
+		verifier: notationVerifier,
 	}, nil
 }
 
-// newVerifierOptions builds notation-go verifier options, wiring revocation
-// validators when CRL checking is configured. Caller-supplied validators are
-// preserved; missing ones are created from the configured CRL fetcher.
-func newVerifierOptions(opts *VerifierOptions) (verifier.VerifierOptions, error) {
-	verifierOpts := verifier.VerifierOptions{
-		RevocationCodeSigningValidator:  opts.RevocationCodeSigningValidator,
-		RevocationTimestampingValidator: opts.RevocationTimestampingValidator,
-	}
-	if opts.CRL == nil {
-		return verifierOpts, nil
-	}
-
-	crlFetcher, err := newCRLFetcher(opts.CRL)
-	if err != nil {
-		return verifierOpts, fmt.Errorf("failed to create CRL fetcher: %w", err)
-	}
-	if verifierOpts.RevocationCodeSigningValidator == nil {
-		validator, err := newRevocationValidator(revocation.Options{
-			CRLFetcher:       crlFetcher,
-			CertChainPurpose: purpose.CodeSigning,
-		})
+// toNotationVerifier builds the underlying notation.Verifier from opts, wiring
+// CRL revocation validators when CRL checking is configured.
+func (opts *VerifierOptions) toNotationVerifier() (notation.Verifier, error) {
+	notationVerifierOpts := verifier.VerifierOptions{}
+	if opts.CRL != nil {
+		codeSigningValidator, timestampingValidator, err := newCRLHandler().revocationValidators(opts.CRL)
 		if err != nil {
-			return verifierOpts, fmt.Errorf("failed to create code signing revocation validator: %w", err)
+			return nil, err
 		}
-		verifierOpts.RevocationCodeSigningValidator = validator
+		notationVerifierOpts.RevocationCodeSigningValidator = codeSigningValidator
+		notationVerifierOpts.RevocationTimestampingValidator = timestampingValidator
 	}
-	if verifierOpts.RevocationTimestampingValidator == nil {
-		validator, err := newRevocationValidator(revocation.Options{
-			CRLFetcher:       crlFetcher,
-			CertChainPurpose: purpose.Timestamping,
-		})
-		if err != nil {
-			return verifierOpts, fmt.Errorf("failed to create timestamping revocation validator: %w", err)
-		}
-		verifierOpts.RevocationTimestampingValidator = validator
-	}
-	return verifierOpts, nil
-}
 
-// newCRLFetcher creates an HTTP CRL fetcher with a bounded per-fetch timeout,
-// optionally backed by Notation's on-disk CRL cache.
-func newCRLFetcher(opts *CRLOptions) (corecrl.Fetcher, error) {
-	fetcher, err := newHTTPCRLFetcher(&http.Client{Timeout: resolveCRLTimeout(opts.HTTPTimeout)})
+	v, err := verifier.NewWithOptions(opts.TrustPolicyDoc, opts.TrustStore, opts.PluginManager, notationVerifierOpts)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to create notation verifier: %w", err)
 	}
-	if !opts.CacheEnabled {
-		return fetcher, nil
-	}
-
-	cacheRoot, err := crlCacheRootPath()
-	if err != nil {
-		return nil, err
-	}
-	cache, err := notationcrl.NewFileCache(cacheRoot)
-	if err != nil {
-		return nil, err
-	}
-	fetcher.Cache = cache
-	return fetcher, nil
-}
-
-// resolveCRLTimeout returns the configured CRL fetch timeout, falling back to
-// defaultCRLFetchTimeout when the caller did not set a positive value.
-func resolveCRLTimeout(timeout time.Duration) time.Duration {
-	if timeout <= 0 {
-		return defaultCRLFetchTimeout
-	}
-	return timeout
-}
-
-// isNil reports whether an interface value is nil or wraps a nil pointer (typed
-// nil), which a plain == nil comparison would miss.
-func isNil(v any) bool {
-	if v == nil {
-		return true
-	}
-	rv := reflect.ValueOf(v)
-	return rv.Kind() == reflect.Pointer && rv.IsNil()
+	return v, nil
 }
 
 // Name returns the name of the verifier.

@@ -206,56 +206,24 @@ func TestNewVerifierWithCRL(t *testing.T) {
 	}
 }
 
-func TestNewVerifierOptions(t *testing.T) {
-	t.Run("no CRL leaves revocation validators unset", func(t *testing.T) {
-		opts, err := newVerifierOptions(&VerifierOptions{})
+func TestRevocationValidators(t *testing.T) {
+	t.Run("creates code signing and timestamping validators", func(t *testing.T) {
+		codeSigning, timestamping, err := newCRLHandler().revocationValidators(&CRLOptions{})
 		if err != nil {
-			t.Fatalf("expected verifier options: %v", err)
+			t.Fatalf("expected revocation validators: %v", err)
 		}
-		if opts.RevocationCodeSigningValidator != nil {
-			t.Fatal("expected code signing validator to be unset")
-		}
-		if opts.RevocationTimestampingValidator != nil {
-			t.Fatal("expected timestamping validator to be unset")
-		}
-	})
-
-	t.Run("CRL creates missing revocation validators", func(t *testing.T) {
-		opts, err := newVerifierOptions(&VerifierOptions{CRL: &CRLOptions{}})
-		if err != nil {
-			t.Fatalf("expected verifier options with CRL: %v", err)
-		}
-		if opts.RevocationCodeSigningValidator == nil {
+		if codeSigning == nil {
 			t.Fatal("expected code signing validator")
 		}
-		if opts.RevocationTimestampingValidator == nil {
+		if timestamping == nil {
 			t.Fatal("expected timestamping validator")
-		}
-	})
-
-	t.Run("custom validators are preserved", func(t *testing.T) {
-		codeSigningValidator := mockRevocationValidator{}
-		timestampingValidator := mockRevocationValidator{}
-		opts, err := newVerifierOptions(&VerifierOptions{
-			CRL:                             &CRLOptions{},
-			RevocationCodeSigningValidator:  codeSigningValidator,
-			RevocationTimestampingValidator: timestampingValidator,
-		})
-		if err != nil {
-			t.Fatalf("expected verifier options with custom validators: %v", err)
-		}
-		if opts.RevocationCodeSigningValidator != codeSigningValidator {
-			t.Fatal("expected custom code signing validator to be preserved")
-		}
-		if opts.RevocationTimestampingValidator != timestampingValidator {
-			t.Fatal("expected custom timestamping validator to be preserved")
 		}
 	})
 }
 
 func TestNewCRLFetcher(t *testing.T) {
 	t.Run("without cache", func(t *testing.T) {
-		fetcher, err := newCRLFetcher(&CRLOptions{})
+		fetcher, err := newCRLHandler().newFetcher(&CRLOptions{})
 		if err != nil {
 			t.Fatalf("expected CRL fetcher: %v", err)
 		}
@@ -275,7 +243,7 @@ func TestNewCRLFetcher(t *testing.T) {
 			dir.UserCacheDir = oldCacheDir
 		})
 
-		fetcher, err := newCRLFetcher(&CRLOptions{CacheEnabled: true})
+		fetcher, err := newCRLHandler().newFetcher(&CRLOptions{CacheEnabled: true})
 		if err != nil {
 			t.Fatalf("expected CRL fetcher with cache: %v", err)
 		}
@@ -289,19 +257,19 @@ func TestNewCRLFetcher(t *testing.T) {
 	})
 }
 
-func TestResolveCRLTimeout(t *testing.T) {
+func TestResolveTimeout(t *testing.T) {
 	tests := []struct {
 		name     string
 		input    time.Duration
 		expected time.Duration
 	}{
-		{name: "zero uses default", input: 0, expected: defaultCRLFetchTimeout},
-		{name: "negative uses default", input: -1 * time.Second, expected: defaultCRLFetchTimeout},
+		{name: "zero uses fallback", input: 0, expected: defaultCRLFetchTimeout},
+		{name: "negative uses fallback", input: -1 * time.Second, expected: defaultCRLFetchTimeout},
 		{name: "positive is preserved", input: 5 * time.Second, expected: 5 * time.Second},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			if got := resolveCRLTimeout(test.input); got != test.expected {
+			if got := resolveTimeout(test.input, defaultCRLFetchTimeout); got != test.expected {
 				t.Fatalf("expected %v, got %v", test.expected, got)
 			}
 		})
@@ -330,14 +298,14 @@ func TestCRLFetcherCacheError(t *testing.T) {
 	dir.UserCacheDir = badDir
 	t.Cleanup(func() { dir.UserCacheDir = oldCacheDir })
 
-	t.Run("newCRLFetcher returns cache error", func(t *testing.T) {
-		if _, err := newCRLFetcher(&CRLOptions{CacheEnabled: true}); err == nil {
+	t.Run("newFetcher returns cache error", func(t *testing.T) {
+		if _, err := newCRLHandler().newFetcher(&CRLOptions{CacheEnabled: true}); err == nil {
 			t.Fatal("expected CRL cache error, got nil")
 		}
 	})
 
-	t.Run("newVerifierOptions propagates fetcher error", func(t *testing.T) {
-		if _, err := newVerifierOptions(&VerifierOptions{CRL: &CRLOptions{CacheEnabled: true}}); err == nil {
+	t.Run("revocationValidators propagate fetcher error", func(t *testing.T) {
+		if _, _, err := newCRLHandler().revocationValidators(&CRLOptions{CacheEnabled: true}); err == nil {
 			t.Fatal("expected fetcher error, got nil")
 		}
 	})
@@ -367,57 +335,50 @@ func TestNewVerifierTypedNilTrustStore(t *testing.T) {
 	}
 }
 
-func TestNewVerifierOptionsErrorPaths(t *testing.T) {
+func TestRevocationValidatorsErrorPaths(t *testing.T) {
 	t.Run("CRL fetcher creation error", func(t *testing.T) {
-		restore := newHTTPCRLFetcher
-		newHTTPCRLFetcher = func(*http.Client) (*corecrl.HTTPFetcher, error) {
+		h := newCRLHandler()
+		h.newHTTPFetcher = func(*http.Client) (*corecrl.HTTPFetcher, error) {
 			return nil, errors.New("fetcher error")
 		}
-		t.Cleanup(func() { newHTTPCRLFetcher = restore })
-
-		if _, err := newVerifierOptions(&VerifierOptions{CRL: &CRLOptions{}}); err == nil {
+		if _, _, err := h.revocationValidators(&CRLOptions{}); err == nil {
 			t.Fatal("expected fetcher error, got nil")
 		}
 	})
 
 	t.Run("code signing validator creation error", func(t *testing.T) {
-		restore := newRevocationValidator
-		newRevocationValidator = func(revocation.Options) (revocation.Validator, error) {
+		h := newCRLHandler()
+		h.newValidator = func(revocation.Options) (revocation.Validator, error) {
 			return nil, errors.New("validator error")
 		}
-		t.Cleanup(func() { newRevocationValidator = restore })
-
-		if _, err := newVerifierOptions(&VerifierOptions{CRL: &CRLOptions{}}); err == nil {
+		if _, _, err := h.revocationValidators(&CRLOptions{}); err == nil {
 			t.Fatal("expected code signing validator error, got nil")
 		}
 	})
 
 	t.Run("timestamping validator creation error", func(t *testing.T) {
-		restore := newRevocationValidator
-		newRevocationValidator = func(revocation.Options) (revocation.Validator, error) {
+		h := newCRLHandler()
+		// Fail only on the second validator so the timestamping creation path
+		// surfaces the error.
+		var calls int
+		h.newValidator = func(revocation.Options) (revocation.Validator, error) {
+			calls++
+			if calls == 1 {
+				return mockRevocationValidator{}, nil
+			}
 			return nil, errors.New("validator error")
 		}
-		t.Cleanup(func() { newRevocationValidator = restore })
-
-		// Supplying the code signing validator skips its creation, so only the
-		// timestamping validator is created and can surface the error.
-		_, err := newVerifierOptions(&VerifierOptions{
-			CRL:                            &CRLOptions{},
-			RevocationCodeSigningValidator: mockRevocationValidator{},
-		})
-		if err == nil {
+		if _, _, err := h.revocationValidators(&CRLOptions{}); err == nil {
 			t.Fatal("expected timestamping validator error, got nil")
 		}
 	})
 
 	t.Run("CRL cache root resolution error", func(t *testing.T) {
-		restore := crlCacheRootPath
-		crlCacheRootPath = func() (string, error) {
+		h := newCRLHandler()
+		h.cacheRootPath = func() (string, error) {
 			return "", errors.New("cache root error")
 		}
-		t.Cleanup(func() { crlCacheRootPath = restore })
-
-		if _, err := newCRLFetcher(&CRLOptions{CacheEnabled: true}); err == nil {
+		if _, err := h.newFetcher(&CRLOptions{CacheEnabled: true}); err == nil {
 			t.Fatal("expected cache root error, got nil")
 		}
 	})
