@@ -2437,3 +2437,80 @@ func TestVerifier_IgnoreObserverTimestamps(t *testing.T) {
 		})
 	}
 }
+
+// TestVerifier_IgnoreCTLog verifies that the certificate transparency log never
+// applies to key-based verification: a public-key signature is accepted
+// regardless of IgnoreCTLog, because public keys carry no signed certificate
+// timestamps. Before the GetPublicKeys gate, IgnoreCTLog=false forced an SCT
+// requirement that a public-key bundle can never satisfy.
+func TestVerifier_IgnoreCTLog(t *testing.T) {
+	ctx := context.Background()
+	repo := "test/repo"
+
+	priv, pub, err := generateTestKey()
+	if err != nil {
+		t.Fatalf("failed to generate test key: %v", err)
+	}
+
+	sigLayer := signKeyLayer(t, priv)
+
+	manifestBytes, err := createTestManifest([]ocispec.Descriptor{sigLayer})
+	if err != nil {
+		t.Fatalf("failed to create test manifest: %v", err)
+	}
+	artifactDesc := ocispec.Descriptor{
+		ArtifactType: mediaTypeCosignArtifactSignature,
+		MediaType:    ocispec.MediaTypeImageManifest,
+		Digest:       digest.FromBytes(manifestBytes),
+		Size:         int64(len(manifestBytes)),
+	}
+
+	getPublicKeys := (&testTrustedPublicKeys{
+		configs: []*PublicKeyConfig{
+			{
+				PublicKey:          pub,
+				SignatureAlgorithm: crypto.SHA256,
+			},
+		},
+	}).GetPublicKeys
+
+	// The certificate transparency log does not apply to public keys, so
+	// key-based verification succeeds regardless of the IgnoreCTLog value.
+	tests := []struct {
+		name        string
+		ignoreCTLog bool
+	}{
+		{name: "ignoreCTLog false accepts key signature", ignoreCTLog: false},
+		{name: "ignoreCTLog true accepts key signature", ignoreCTLog: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := newMockStore()
+			store.addManifest(repo, artifactDesc, manifestBytes)
+
+			verifier, err := NewVerifier(&VerifierOptions{
+				Name:                     "test-verifier",
+				GetPublicKeys:            getPublicKeys,
+				IdentityPolicies:         []verify.PolicyOption{verify.WithKey()},
+				IgnoreTLog:               true,
+				IgnoreCTLog:              tt.ignoreCTLog,
+				IgnoreObserverTimestamps: true,
+			})
+			if err != nil {
+				t.Fatalf("failed to create verifier: %v", err)
+			}
+
+			result, err := verifier.Verify(ctx, &ratify.VerifyOptions{
+				Store:              store,
+				Repository:         repo,
+				ArtifactDescriptor: artifactDesc,
+			})
+			if err != nil {
+				t.Fatalf("unexpected error during verification: %v", err)
+			}
+			if result.Err != nil {
+				t.Fatalf("expected verification to succeed with ignoreCTLog=%v, got error: %v", tt.ignoreCTLog, result.Err)
+			}
+		})
+	}
+}
