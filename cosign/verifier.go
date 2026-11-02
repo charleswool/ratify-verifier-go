@@ -194,8 +194,11 @@ func createVerifier(opts *VerifierOptions) (*verify.Verifier, error) {
 		verifierOpts = append(verifierOpts, verify.WithObserverTimestamps(1))
 	}
 
-	// Configure certificate transparency log verification
-	if !opts.IgnoreCTLog {
+	// Configure certificate transparency log verification. Key-based
+	// verification carries no Fulcio certificate and therefore no signed
+	// certificate timestamps, so the certificate transparency log never applies
+	// there and IgnoreCTLog is a no-op for it.
+	if !opts.IgnoreCTLog && opts.GetPublicKeys == nil {
 		verifierOpts = append(verifierOpts, verify.WithSignedCertificateTimestamps(1))
 	}
 
