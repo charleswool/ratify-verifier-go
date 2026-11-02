@@ -255,6 +255,52 @@ func TestNewCRLFetcher(t *testing.T) {
 			t.Fatal("expected CRL cache to be enabled")
 		}
 	})
+
+	t.Run("with custom cache dir", func(t *testing.T) {
+		h := newCRLHandler()
+		h.cacheRootPath = func() (string, error) {
+			return "", errors.New("default cache root must not be used")
+		}
+		cacheDir := filepath.Join(t.TempDir(), "crl")
+
+		fetcher, err := h.newFetcher(&CRLOptions{CacheEnabled: true, CacheDir: cacheDir})
+		if err != nil {
+			t.Fatalf("expected CRL fetcher with custom cache dir: %v", err)
+		}
+		if fetcher.(*corecrl.HTTPFetcher).Cache == nil {
+			t.Fatal("expected CRL cache to be enabled")
+		}
+		if info, err := os.Stat(cacheDir); err != nil || !info.IsDir() {
+			t.Fatalf("expected cache dir %q to be created: %v", cacheDir, err)
+		}
+	})
+
+	t.Run("applies HTTP timeout", func(t *testing.T) {
+		tests := []struct {
+			name     string
+			timeout  time.Duration
+			expected time.Duration
+		}{
+			{name: "default", expected: defaultCRLFetchTimeout},
+			{name: "custom", timeout: time.Second, expected: time.Second},
+		}
+		for _, test := range tests {
+			t.Run(test.name, func(t *testing.T) {
+				h := newCRLHandler()
+				var got time.Duration
+				h.newHTTPFetcher = func(c *http.Client) (*corecrl.HTTPFetcher, error) {
+					got = c.Timeout
+					return corecrl.NewHTTPFetcher(c)
+				}
+				if _, err := h.newFetcher(&CRLOptions{HTTPTimeout: test.timeout}); err != nil {
+					t.Fatalf("expected CRL fetcher: %v", err)
+				}
+				if got != test.expected {
+					t.Fatalf("expected timeout %v, got %v", test.expected, got)
+				}
+			})
+		}
+	})
 }
 
 func TestResolveTimeout(t *testing.T) {
