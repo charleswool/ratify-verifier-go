@@ -54,9 +54,9 @@ type VerifierOptions struct {
 	// Optional.
 	PluginManager plugin.Manager
 
-	// CRL configures certificate revocation list checks. Optional. When set,
-	// code signing and timestamping revocation validators are created using the
-	// configured CRL fetcher.
+	// CRL configures the CRL fetcher used for revocation checks. Optional.
+	// Revocation is checked regardless: notation-go tries OCSP first and falls
+	// back to CRL. When nil, notation-go's default uncached CRL fetcher is used.
 	CRL *CRLOptions
 }
 

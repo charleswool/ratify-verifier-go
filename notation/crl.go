@@ -27,18 +27,19 @@ import (
 	notationcrl "github.com/notaryproject/notation-go/verifier/crl"
 )
 
-// defaultCRLFetchTimeout bounds each CRL distribution-point fetch so a slow or
-// unresponsive CRL server cannot block signature verification indefinitely.
-const defaultCRLFetchTimeout = 10 * time.Second
+// defaultCRLFetchTimeout keeps the OCSP check (2s in notation-go) plus the CRL
+// fallback within Gatekeeper's default 5s validation timeout.
+const defaultCRLFetchTimeout = 3 * time.Second
 
-// CRLOptions contains options for CRL revocation checking.
 type CRLOptions struct {
-	// CacheEnabled enables file-backed CRL caching using Notation's cache
-	// directory. Optional.
+	// CacheEnabled enables file-backed CRL caching. Optional.
 	CacheEnabled bool
 
-	// HTTPTimeout bounds each CRL distribution-point fetch. Optional. When zero
-	// or negative, defaultCRLFetchTimeout is used.
+	// CacheDir is the CRL cache directory used when CacheEnabled is true.
+	// Optional. Defaults to Notation's CRL cache directory, which depends on
+	// $XDG_CACHE_HOME or $HOME.
+	CacheDir string
+
 	HTTPTimeout time.Duration
 }
 
@@ -98,9 +99,12 @@ func (h *crlHandler) newFetcher(opts *CRLOptions) (corecrl.Fetcher, error) {
 		return fetcher, nil
 	}
 
-	cacheRoot, err := h.cacheRootPath()
-	if err != nil {
-		return nil, err
+	cacheRoot := opts.CacheDir
+	if cacheRoot == "" {
+		cacheRoot, err = h.cacheRootPath()
+		if err != nil {
+			return nil, err
+		}
 	}
 	cache, err := notationcrl.NewFileCache(cacheRoot)
 	if err != nil {
